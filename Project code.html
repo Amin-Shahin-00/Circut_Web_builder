@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Advanced Circuit Analyzer PRO</title>
+    <style>
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            background-color: #0f1115; overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            cursor: crosshair;
+        }
+        #circuitCanvas { display: block; width: 100%; height: 100%; }
+        .toolbar {
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(25, 28, 35, 0.85); backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1); padding: 12px 25px;
+            border-radius: 12px; display: flex; gap: 12px; color: white;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8); z-index: 10;
+        }
+        .tool-btn {
+            background: none; border: none; color: #8b92a5; font-size: 14px;
+            cursor: pointer; transition: all 0.2s; white-space: nowrap; font-weight: 500;
+        }
+        .tool-btn:hover, .tool-btn.active { color: #ffffff; text-shadow: 0 0 10px rgba(255, 255, 255, 0.4); }
+        .divider { width: 1px; background: rgba(255,255,255,0.2); margin: 0 5px; }
+    </style>
+</head>
+<body>
+
+   <div class="toolbar">
+        <button class="tool-btn active" id="tool-wire">Wire</button>
+        <button class="tool-btn" id="tool-resistor">Resistor</button>
+        <button class="tool-btn" id="tool-capacitor">Capacitor</button> 
+        <button class="tool-btn" id="tool-switch">Switch</button>
+        <button class="tool-btn" id="tool-battery">Battery</button>
+        <button class="tool-btn" id="tool-eraser" style="color: #ffaa00;">Eraser</button>
+        
+        <div class="divider"></div>
+        <button class="tool-btn" id="btn-undo" title="Ctrl+Z">↩ Undo</button>
+        <button class="tool-btn" id="btn-redo" title="Ctrl+Y">↪ Redo</button>
+        
+        <div class="divider"></div>
+        <button class="tool-btn" id="btn-save" style="color: #00aaff;">💾 Save</button>
+        <button class="tool-btn" id="btn-load" style="color: #00aaff;">📂 Load</button>
+        <button class="tool-btn" id="btn-export" style="color: #c471ed;">📄 SPICE</button>
+        <button class="tool-btn" id="btn-clear" style="color: #ff3366;">🗑️ Clear</button>
+        
+        <div class="divider"></div>
+        <button class="tool-btn" id="btn-run" style="color: #00ffaa; font-weight: bold;">▶ Run</button>
+    </div>
+
+    <canvas id="circuitCanvas"></canvas>
+
+    <script>
+    class CircuitCanvas {
+        constructor(canvasId) {
+            this.canvas = document.getElementById(canvasId);
+            this.ctx = this.canvas.getContext('2d');
+            
+            this.gridSpacing = 40; 
+            this.dotRadius = 2;
+            this.components = [];      
+            this.simulationResults = null;
+            
+            this.currentTool = 'wire'; 
+            this.isDrawing = false;    
+            this.startNode = null;     
+            this.hoveredNode = null; 
+
+            this.cameraX = 0;
+            this.cameraY = 0;
+            this.cameraZoom = 1;
+            this.isPanning = false;
+            this.lastPanMouse = { x: 0, y: 0 };
+
+            // NEW: State Management for Undo/Redo
+            this.history = [];
+            this.historyStep = -1;
+            this.saveState(); // Save initial empty state
+            
+            this.resizeCanvas();
+            this.setupToolbar();       
+            this.setupEventListeners();
+            this.render();
+        }
+
+        // --- STATE MANAGEMENT (Command Pattern) ---
+        saveState() {
+            this.historyStep++;
+            this.history.splice(this.historyStep); // Delete future history if we branched
+            this.history.push(JSON.stringify(this.components));
+        }
+
+        undo() {
+            if (this.historyStep > 0) {
+                this.historyStep--;
+                this.components = JSON.parse(this.history[this.historyStep]);
+                this.simulationResults = null;
+                this.render();
+            }
+        }
+
+        redo() {
+            if (this.historyStep < this.history.length - 1) {
+                this.historyStep++;
+                this.components = JSON.parse(this.history[this.historyStep]);
+                this.simulationResults = null;
+                this.render();
+            }
+        }
+
+        resizeCanvas() {
+            this.canvas.width = window.innerWidth;
+            this.canvas.height = window.innerHeight;
+        }
+
+        setupToolbar() {
+            const buttons = document.querySelectorAll('.tool-btn');
+            buttons.forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const actionBtns = ['btn-run', 'btn-clear', 'btn-save', 'btn-load', 'btn-undo', 'btn-redo', 'btn-export'];
+                    if (actionBtns.includes(e.target.id)) return;
+
+                    buttons.forEach(b => b.classList.remove('active'));
+                    e.target.classList.add('active');
+                    this.currentTool = e.target.id.replace('tool-', '');
+                    this.isDrawing = false;
+                    this.startNode = null;
+                    this.render();
+                });
+            });
+
+            document.getElementById('btn-run').addEventListener('click', () => {
+                const netlist = this.generateNetlist();
+                this.simulationResults = this.solveCircuit(netlist);
+                this.render(); 
+            });
+
+            document.getElementById('btn-clear').addEventListener('click', () => {
+                this.components = []; this.simulationResults = null; 
+                this.cameraX = 0; this.cameraY = 0; this.cameraZoom = 1; 
+                this.saveState(); this.render();                    
+            });
+
+            document.getElementById('btn-undo').addEventListener('click', () => this.undo());
+            document.getElementById('btn-redo').addEventListener('click', () => this.redo());
+
+            document.getElementById('btn-save').addEventListener('click', () => {
+                localStorage.setItem('savedCircuit', JSON.stringify(this.components));
+                alert('Circuit saved to your browser!');
+            });
+
+            document.getElementById('btn-load').addEventListener('click', () => {
+                const saved = localStorage.getItem('savedCircuit');
+                if (saved) {
+                    this.components = JSON.parse(saved);
+                    this.simulationResults = null;
+                    this.saveState(); this.render();
+                } else alert('No saved circuit found!');
+            });
+
+            // NEW: SPICE Export
+            document.getElementById('btn-export').addEventListener('click', () => {
+                let spice = "* Advanced Circuit Analyzer PRO Export\n";
+                let netlist = this.generateNetlist();
+                netlist.forEach((c, index) => {
+                    let prefix = c.type === 'resistor' ? 'R' : c.type === 'battery' ? 'V' : c.type === 'capacitor' ? 'C' : c.type === 'switch' ? 'S' : 'X';
+                    let val = c.type === 'switch' ? (c.isOpen ? '1G' : '1n') : c.value;
+                    spice += `${prefix}${index} N${c.nodeA} N${c.nodeB} ${val}\n`;
+                });
+                alert("SPICE Netlist:\n\n" + spice);
+            });
+        } 
+
+        getWorldCoords(screenX, screenY) {
+            const rect = this.canvas.getBoundingClientRect();
+            return {
+                x: (screenX - rect.left - this.cameraX) / this.cameraZoom,
+                y: (screenY - rect.top - this.cameraY) / this.cameraZoom
+            };
+        }
+
+        setupEventListeners() {
+            this.canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+            // NEW: Keyboard listeners for Undo/Redo
+            window.addEventListener('keydown', (e) => {
+                if (e.ctrlKey && e.key === 'z') { e.preventDefault(); this.undo(); }
+                if (e.ctrlKey && e.key === 'y') { e.preventDefault(); this.redo(); }
+            });
+
+            this.canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const zoomAmount = e.deltaY > 0 ? 0.9 : 1.1; 
+                const rect = this.canvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+
+                const worldBeforeZoom = this.getWorldCoords(e.clientX, e.clientY);
+                this.cameraZoom *= zoomAmount;
+                this.cameraZoom = Math.max(0.2, Math.min(this.cameraZoom, 3)); 
+
+                this.cameraX = mouseX - worldBeforeZoom.x * this.cameraZoom;
+                this.cameraY = mouseY - worldBeforeZoom.y * this.cameraZoom;
+                this.render();
+            }, { passive: false });
+
+            this.canvas.addEventListener('mousedown', (e) => {
+                if (e.button === 2 || e.button === 1) { 
+                    this.isPanning = true;
+                    this.lastPanMouse = { x: e.clientX, y: e.clientY };
+                    return;
+                }
+
+                if (this.currentTool === 'eraser') {
+                    const world = this.getWorldCoords(e.clientX, e.clientY);
+                    const clickedIdx = this.components.findIndex(comp => {
+                        const minX = Math.min(comp.startX, comp.endX) - 15;
+                        const maxX = Math.max(comp.startX, comp.endX) + 15;
+                        const minY = Math.min(comp.startY, comp.endY) - 15;
+                        const maxY = Math.max(comp.startY, comp.endY) + 15;
+                        return (world.x >= minX && world.x <= maxX && world.y >= minY && world.y <= maxY);
+                    });
+                    if (clickedIdx !== -1) {
+                        this.components.splice(clickedIdx, 1);
+                        this.simulationResults = null; 
+                        this.saveState(); // Save state after erasing
+                        this.render();
+                    }
+                    return; 
+                }
+
+                if (this.hoveredNode) {
+                    this.isDrawing = true;
+                    this.startNode = { x: this.hoveredNode.x, y: this.hoveredNode.y };
+                }
+            });
+
+            this.canvas.addEventListener('mousemove', (e) => {
+                if (this.isPanning) {
+                    this.cameraX += (e.clientX - this.lastPanMouse.x);
+                    this.cameraY += (e.clientY - this.lastPanMouse.y);
+                    this.lastPanMouse = { x: e.clientX, y: e.clientY };
+                    this.render();
+                    return;
+                }
+
+                const world = this.getWorldCoords(e.clientX, e.clientY);
+                const snappedX = Math.round(world.x / this.gridSpacing) * this.gridSpacing;
+                const snappedY = Math.round(world.y / this.gridSpacing) * this.gridSpacing;
+
+                if (!this.hoveredNode || this.hoveredNode.x !== snappedX || this.hoveredNode.y !== snappedY) {
+                    this.hoveredNode = { x: snappedX, y: snappedY };
+                    this.render(); 
+                }
+            });
+
+            this.canvas.addEventListener('mouseup', (e) => {
+                if (e.button === 2 || e.button === 1) { this.isPanning = false; return; }
+
+                if (this.isDrawing && this.hoveredNode) {
+                    if (this.startNode.x !== this.hoveredNode.x || this.startNode.y !== this.hoveredNode.y) {
+                        let defValue = 0;
+                        if (this.currentTool === 'resistor') defValue = 100; 
+                        if (this.currentTool === 'battery') defValue = 12;   
+                        if (this.currentTool === 'capacitor') defValue = 10; 
+
+                        this.components.push({
+                            id: Date.now(), type: this.currentTool, value: defValue, isOpen: true,
+                            startX: this.startNode.x, startY: this.startNode.y,
+                            endX: this.hoveredNode.x, endY: this.hoveredNode.y
+                        });
+                        this.simulationResults = null; 
+                        this.saveState(); // Save state after drawing
+                    }
+                }
+                this.isDrawing = false;
+                this.startNode = null;
+                this.render();
+            });
+
+            this.canvas.addEventListener('dblclick', (e) => {
+                const world = this.getWorldCoords(e.clientX, e.clientY);
+                const clickedComponent = this.components.find(comp => {
+                    const minX = Math.min(comp.startX, comp.endX) - 15;
+                    const maxX = Math.max(comp.startX, comp.endX) + 15;
+                    const minY = Math.min(comp.startY, comp.endY) - 15;
+                    const maxY = Math.max(comp.startY, comp.endY) + 15;
+                    return (world.x >= minX && world.x <= maxX && world.y >= minY && world.y <= maxY);
+                });
+
+                if (clickedComponent) {
+                    if (clickedComponent.type === 'switch') {
+                        clickedComponent.isOpen = !clickedComponent.isOpen;
+                        this.simulationResults = null; 
+                        this.saveState(); // Save state after toggling switch
+                        this.render();
+                        return;
+                    }
+
+                    if (clickedComponent.type !== 'wire') {
+                        let unit = '';
+                        if (clickedComponent.type === 'resistor') unit = 'Ohms';
+                        else if (clickedComponent.type === 'battery') unit = 'Volts';
+                        else if (clickedComponent.type === 'capacitor') unit = 'Microfarads';
+
+                        const newValue = window.prompt(`Enter new value for this ${clickedComponent.type} in ${unit}:`, clickedComponent.value);
+                        if (newValue !== null && !isNaN(newValue)) {
+                            clickedComponent.value = parseFloat(newValue);
+                            this.simulationResults = null; 
+                            this.saveState(); // Save state after editing value
+                            this.render();
+                        }
+                    }
+                }
+            });
+
+            window.addEventListener('resize', () => { this.resizeCanvas(); this.render(); });
+        }
+
+        // --- RENDER ENGINE ---
+        
+        drawGrid() {
+            this.ctx.fillStyle = 'rgba(255, 255, 255, 0.1)'; 
+            const startX = Math.floor(-this.cameraX / this.cameraZoom / this.gridSpacing) * this.gridSpacing;
+            const endX = startX + (this.canvas.width / this.cameraZoom) + this.gridSpacing * 2;
+            const startY = Math.floor(-this.cameraY / this.cameraZoom / this.gridSpacing) * this.gridSpacing;
+            const endY = startY + (this.canvas.height / this.cameraZoom) + this.gridSpacing * 2;
+
+            for (let x = startX; x <= endX; x += this.gridSpacing) {
+                for (let y = startY; y <= endY; y += this.gridSpacing) {
+                    this.ctx.beginPath();
+                    this.ctx.arc(x, y, this.dotRadius / this.cameraZoom, 0, Math.PI * 2);
+                    this.ctx.fill();
+                }
+            }
+        }
+
+        drawHoverEffect() {
+            if (this.hoveredNode && !this.isPanning && this.currentTool !== 'eraser') {
+                this.ctx.fillStyle = 'rgba(0, 150, 255, 0.8)'; 
+                this.ctx.beginPath();
+                this.ctx.arc(this.hoveredNode.x, this.hoveredNode.y, this.dotRadius * 4, 0, Math.PI * 2);
+                this.ctx.fill();
+            }
+        }
+
+        // NEW: Heatmap coloring logic for wires
+        drawWireGeometry(startX, startY, endX, endY, voltage = null) {
+            this.ctx.beginPath(); this.ctx.moveTo(startX, startY); this.ctx.lineTo(endX, endY);
+            
+            if (voltage === null || Math.abs(voltage) < 0.01) this.ctx.strokeStyle = '#ffffff'; // Ground / Zero
+            else if (voltage > 0) this.ctx.strokeStyle = '#ff3366'; // Positive (Red)
+            else this.ctx.strokeStyle = '#00aaff'; // Negative (Blue)
+            
+            this.ctx.lineWidth = 3; this.ctx.stroke();
+        }
+
+        drawResistorGeometry(startX, startY, endX, endY) {
+            const dx = endX - startX, dy = endY - startY, angle = Math.atan2(dy, dx), length = Math.sqrt(dx*dx + dy*dy);
+            this.ctx.save(); this.ctx.translate(startX, startY); this.ctx.rotate(angle);
+            this.ctx.beginPath(); this.ctx.moveTo(0, 0); this.ctx.lineTo(length / 2 - 15, 0);
+            this.ctx.lineTo(length / 2 - 10, -10); this.ctx.lineTo(length / 2 - 5, 10);
+            this.ctx.lineTo(length / 2, -10); this.ctx.lineTo(length / 2 + 5, 10);
+            this.ctx.lineTo(length / 2 + 10, -10); this.ctx.lineTo(length / 2 + 15, 0);
+            this.ctx.lineTo(length, 0);
+            this.ctx.strokeStyle = '#ffaa00'; this.ctx.lineWidth = 2; this.ctx.stroke(); this.ctx.restore();
+        }
+
+        drawCapacitorGeometry(startX, startY, endX, endY) {
+            const dx = endX - startX, dy = endY - startY, angle = Math.atan2(dy, dx), length = Math.sqrt(dx*dx + dy*dy);
+            this.ctx.save(); this.ctx.translate(startX, startY); this.ctx.rotate(angle);
+            this.ctx.beginPath(); this.ctx.moveTo(0, 0); this.ctx.lineTo(length / 2 - 5, 0);
+            this.ctx.strokeStyle = '#ffffff'; this.ctx.lineWidth = 3; this.ctx.stroke();
+            this.ctx.beginPath(); this.ctx.moveTo(length / 2 - 5, -15); this.ctx.lineTo(length / 2 - 5, 15);
+            this.ctx.strokeStyle = '#00aaff'; this.ctx.lineWidth = 3; this.ctx.stroke();
+            this.ctx.beginPath(); this.ctx.moveTo(length / 2 + 5, -15); this.ctx.lineTo(length / 2 + 5, 15);
+            this.ctx.stroke();
+            this.ctx.beginPath(); this.ctx.moveTo(length / 2 + 5, 0); this.ctx.lineTo(length, 0);
+            this.ctx.strokeStyle = '#ffffff'; this.ctx.stroke(); this.ctx.restore();
+        }
+
+        drawBatteryGeometry(startX, startY, endX, endY) {
+            const dx = endX - startX, dy = endY - startY, angle = Math.atan2(dy, dx), length = Math.sqrt(dx*dx + dy*dy);
+            this.ctx.save(); this.ctx.translate(startX, startY); this.ctx.rotate(angle);
+            this.ctx.beginPath(); this.ctx.moveTo(0, 0); this.ctx.lineTo(length / 2 - 4, 0);
+            this.ctx.strokeStyle = '#ffffff'; this.ctx.lineWidth = 3; this.ctx.stroke();
+            this.ctx.beginPath(); this.ctx.moveTo(length / 2 - 4, -12); this.ctx.lineTo(length / 2 - 4, 12);
+            this.ctx.strokeStyle = '#ff3366'; this.ctx.lineWidth = 4; this.ctx.stroke();
+            this.ctx.beginPath(); this.ctx.moveTo(length / 2 + 4, -20); this.ctx.lineTo(length / 2 + 4, 20);
+            this.ctx.lineWidth = 2; this.ctx.stroke();
+            this.ctx.beginPath(); this.ctx.moveTo(length / 2 + 4, 0); this.ctx.lineTo(length, 0);
+            this.ctx.strokeStyle = '#ffffff'; this.ctx.lineWidth = 3; this.ctx.stroke(); this.ctx.restore();
+        }
+
+        drawSwitchGeometry(startX, startY, endX, endY, isOpen) {
+            const dx = endX - startX, dy = endY - startY, angle = Math.atan2(dy, dx), length = Math.sqrt(dx*dx + dy*dy);
+            this.ctx.save(); this.ctx.translate(startX, startY); this.ctx.rotate(angle);
+            this.ctx.strokeStyle = '#ffffff'; this.ctx.lineWidth = 3;
+            this.ctx.beginPath(); this.ctx.moveTo(0, 0); this.ctx.lineTo(length / 2 - 12, 0); this.ctx.stroke();
+            this.ctx.beginPath(); this.ctx.arc(length / 2 - 10, 0, 3, 0, Math.PI * 2); this.ctx.fillStyle = '#ffffff'; this.ctx.fill();
+            this.ctx.beginPath(); this.ctx.moveTo(length / 2 - 10, 0);
+            if (isOpen) this.ctx.lineTo(length / 2 + 8, -15); else this.ctx.lineTo(length / 2 + 10, 0);
+            this.ctx.stroke();
+            this.ctx.beginPath(); this.ctx.arc(length / 2 + 10, 0, 3, 0, Math.PI * 2); this.ctx.fill();
+            this.ctx.beginPath(); this.ctx.moveTo(length / 2 + 12, 0); this.ctx.lineTo(length, 0); this.ctx.stroke();
+            this.ctx.restore();
+        }
+
+        drawSavedComponents() {
+            this.components.forEach(comp => {
+                if (comp.type === 'wire') {
+                    // Heatmap extraction
+                    let v = null;
+                    if (this.simulationResults && comp.finalNodeA !== undefined) {
+                        v = parseFloat(this.simulationResults.voltages[`Node ${comp.finalNodeA}`]) || 0;
+                    }
+                    this.drawWireGeometry(comp.startX, comp.startY, comp.endX, comp.endY, v);
+                }
+                else if (comp.type === 'resistor') this.drawResistorGeometry(comp.startX, comp.startY, comp.endX, comp.endY);
+                else if (comp.type === 'capacitor') this.drawCapacitorGeometry(comp.startX, comp.startY, comp.endX, comp.endY);
+                else if (comp.type === 'battery') this.drawBatteryGeometry(comp.startX, comp.startY, comp.endX, comp.endY);
+                else if (comp.type === 'switch') this.drawSwitchGeometry(comp.startX, comp.startY, comp.endX, comp.endY, comp.isOpen);
+                
+                if (comp.type !== 'wire' && comp.type !== 'switch') {
+                    const midX = (comp.startX + comp.endX) / 2; const midY = (comp.startY + comp.endY) / 2;
+                    this.ctx.fillStyle = '#8b92a5'; this.ctx.font = '14px sans-serif'; this.ctx.textAlign = 'center';
+                    let unit = '';
+                    if (comp.type === 'resistor') unit = 'Ω'; else if (comp.type === 'battery') unit = 'V'; else if (comp.type === 'capacitor') unit = 'µF'; 
+                    this.ctx.fillText(`${comp.value}${unit}`, midX, midY - 15);
+                }
+            });
+        }
+
+        // --- MATH ENGINE ---
+
+        generateNetlist() {
+            let points = {}, pointIdCounter = 0;
+            const getPointId = (x, y) => {
+                const key = `${Math.round(x)},${Math.round(y)}`;
+                if (points[key] === undefined) points[key] = pointIdCounter++;
+                return points[key];
+            };
+
+            this.components.forEach(comp => {
+                comp.rawNodeA = getPointId(comp.startX, comp.startY);
+                comp.rawNodeB = getPointId(comp.endX, comp.endY);
+            });
+
+            let nodeMap = Array.from({length: pointIdCounter}, (_, i) => i);
+            const findRoot = (id) => {
+                while (nodeMap[id] !== id) { nodeMap[id] = nodeMap[nodeMap[id]]; id = nodeMap[id]; }
+                return id;
+            };
+
+            this.components.forEach(comp => {
+                if (comp.type === 'wire') {
+                    let rootA = findRoot(comp.rawNodeA), rootB = findRoot(comp.rawNodeB);
+                    if (rootA !== rootB) nodeMap[rootB] = rootA; 
+                }
+            });
+
+            let netlist = [];
+            this.components.forEach(comp => {
+                if (comp.type !== 'wire') { 
+                    netlist.push({
+                        id: comp.id, type: comp.type, value: comp.value, isOpen: comp.isOpen,
+                        nodeA: findRoot(comp.rawNodeA), nodeB: findRoot(comp.rawNodeB)
+                    });
+                }
+            });
+
+            let uniqueNodes = [...new Set(netlist.flatMap(c => [c.nodeA, c.nodeB]))].sort();
+            let finalRemap = {};
+            uniqueNodes.forEach((oldNode, index) => { finalRemap[oldNode] = index; });
+
+            netlist = netlist.map(comp => ({
+                ...comp, nodeA: finalRemap[comp.nodeA], nodeB: finalRemap[comp.nodeB]
+            }));
+            
+            this.components.forEach(comp => {
+                comp.finalNodeA = finalRemap[findRoot(comp.rawNodeA)];
+                comp.finalNodeB = finalRemap[findRoot(comp.rawNodeB)];
+            });
+            return netlist;
+        }
+
+        solveCircuit(netlist) {
+            let numNodes = 0, numBatteries = 0;
+            netlist.forEach(comp => {
+                numNodes = Math.max(numNodes, comp.nodeA, comp.nodeB);
+                if (comp.type === 'battery') numBatteries++;
+            });
+            numNodes++; 
+            
+            let systemSize = numNodes + numBatteries;
+            let A = Array(systemSize).fill(0).map(() => Array(systemSize).fill(0));
+            let Z = Array(systemSize).fill(0);
+            let batteryIndex = numNodes;
+
+            netlist.forEach(comp => {
+                let nA = comp.nodeA, nB = comp.nodeB, val = comp.value;
+                if (comp.type === 'resistor') {
+                    let cond = 1.0 / val;
+                    if (nA !== 0) A[nA][nA] += cond; if (nB !== 0) A[nB][nB] += cond;
+                    if (nA !== 0 && nB !== 0) { A[nA][nB] -= cond; A[nB][nA] -= cond; }
+                } else if (comp.type === 'capacitor') {
+                    let cond = 1e-9; 
+                    if (nA !== 0) A[nA][nA] += cond; if (nB !== 0) A[nB][nB] += cond;
+                    if (nA !== 0 && nB !== 0) { A[nA][nB] -= cond; A[nB][nA] -= cond; }
+                } else if (comp.type === 'switch') {
+                    let cond = comp.isOpen ? 1e-9 : 1e9; 
+                    if (nA !== 0) A[nA][nA] += cond; if (nB !== 0) A[nB][nB] += cond;
+                    if (nA !== 0 && nB !== 0) { A[nA][nB] -= cond; A[nB][nA] -= cond; }
+                } else if (comp.type === 'battery') {
+                    if (nA !== 0) { A[nA][batteryIndex] += 1; A[batteryIndex][nA] += 1; }
+                    if (nB !== 0) { A[nB][batteryIndex] -= 1; A[batteryIndex][nB] -= 1; }
+                    Z[batteryIndex] = val; batteryIndex++;
+                }
+            });
+
+            for (let i = 1; i < systemSize; i++) {
+                let pivot = A[i][i];
+                if (Math.abs(pivot) < 1e-9) continue; 
+                for (let j = i; j < systemSize; j++) A[i][j] /= pivot;
+                Z[i] /= pivot;
+                for (let k = i + 1; k < systemSize; k++) {
+                    let factor = A[k][i];
+                    for (let j = i; j < systemSize; j++) A[k][j] -= factor * A[i][j];
+                    Z[k] -= factor * Z[i];
+                }
+            }
+
+            let X = Array(systemSize).fill(0);
+            for (let i = systemSize - 1; i > 0; i--) {
+                X[i] = Z[i];
+                for (let j = i + 1; j < systemSize; j++) { X[i] -= A[i][j] * X[j]; }
+            }
+
+            let currents = {}, bIdx = numNodes;
+            netlist.forEach(comp => {
+                let vA = comp.nodeA === 0 ? 0 : X[comp.nodeA];
+                let vB = comp.nodeB === 0 ? 0 : X[comp.nodeB];
+                if (comp.type === 'resistor') currents[comp.id] = (vA - vB) / comp.value;
+                else if (comp.type === 'switch') currents[comp.id] = comp.isOpen ? 0 : (vA - vB) / 1e-9;
+                else if (comp.type === 'capacitor') currents[comp.id] = 0; 
+                else if (comp.type === 'battery') { currents[comp.id] = X[bIdx]; bIdx++; }
+            });
+
+            let results = { voltages: { "Node 0 (Ground)": "0.00 V" }, currents: currents };
+            for(let i = 1; i < numNodes; i++) results.voltages[`Node ${i}`] = X[i].toFixed(2) + " V";
+            return results;
+        }
+
+        drawSimulationResults() {
+            if (!this.simulationResults) return;
+
+            this.ctx.fillStyle = '#00ffaa'; this.ctx.font = '14px monospace'; this.ctx.textAlign = 'left';
+            let drawnNodes = new Set();
+
+            this.components.forEach(comp => {
+                if (comp.finalNodeA !== undefined && !drawnNodes.has(comp.finalNodeA)) {
+                    let text = comp.finalNodeA === 0 ? "0.00V" : this.simulationResults.voltages[`Node ${comp.finalNodeA}`];
+                    if (text) { this.ctx.fillText(text, comp.startX + 10, comp.startY - 10); drawnNodes.add(comp.finalNodeA); }
+                }
+                if (comp.finalNodeB !== undefined && !drawnNodes.has(comp.finalNodeB)) {
+                    let text = comp.finalNodeB === 0 ? "0.00V" : this.simulationResults.voltages[`Node ${comp.finalNodeB}`];
+                    if (text) { this.ctx.fillText(text, comp.endX + 10, comp.endY - 10); drawnNodes.add(comp.finalNodeB); }
+                }
+            });
+
+            this.components.forEach(comp => {
+                if (this.simulationResults.currents && this.simulationResults.currents[comp.id] !== undefined) {
+                    let current = this.simulationResults.currents[comp.id];
+                    if (Math.abs(current) > 0.001) {
+                        const midX = (comp.startX + comp.endX) / 2, midY = (comp.startY + comp.endY) / 2;
+                        const dx = comp.endX - comp.startX, dy = comp.endY - comp.startY;
+                        let angle = Math.atan2(dy, dx);
+                        if (current < 0) angle += Math.PI; 
+
+                        this.ctx.save(); this.ctx.translate(midX, midY); this.ctx.rotate(angle);
+                        this.ctx.fillStyle = '#ffaa00'; 
+                        this.ctx.beginPath(); this.ctx.moveTo(10, -25); this.ctx.lineTo(25, -15); this.ctx.lineTo(10, -5); this.ctx.fill();
+                        this.ctx.translate(0, -30); this.ctx.rotate(-angle); 
+                        this.ctx.textAlign = 'center'; this.ctx.font = 'bold 12px monospace';
+                        this.ctx.fillText(Math.abs(current).toFixed(2) + ' A', 0, 0);
+                        this.ctx.restore();
+                    }
+                }
+            });
+        }
+
+        render() {
+            this.ctx.setTransform(1, 0, 0, 1, 0, 0); 
+            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+            this.ctx.translate(this.cameraX, this.cameraY);
+            this.ctx.scale(this.cameraZoom, this.cameraZoom);
+
+            this.drawGrid();
+            this.drawSavedComponents();
+
+            if (this.isDrawing && this.hoveredNode && this.startNode && this.currentTool !== 'eraser') {
+                this.ctx.globalAlpha = 0.5; 
+                if (this.currentTool === 'wire') this.drawWireGeometry(this.startNode.x, this.startNode.y, this.hoveredNode.x, this.hoveredNode.y);
+                else if (this.currentTool === 'resistor') this.drawResistorGeometry(this.startNode.x, this.startNode.y, this.hoveredNode.x, this.hoveredNode.y);
+                else if (this.currentTool === 'capacitor') this.drawCapacitorGeometry(this.startNode.x, this.startNode.y, this.hoveredNode.x, this.hoveredNode.y);
+                else if (this.currentTool === 'battery') this.drawBatteryGeometry(this.startNode.x, this.startNode.y, this.hoveredNode.x, this.hoveredNode.y);
+                else if (this.currentTool === 'switch') this.drawSwitchGeometry(this.startNode.x, this.startNode.y, this.hoveredNode.x, this.hoveredNode.y, true);
+                this.ctx.globalAlpha = 1.0; 
+            }
+
+            this.drawHoverEffect();
+            this.drawSimulationResults();
+        }
+    }
+
+    const app = new CircuitCanvas('circuitCanvas');
+    </script>
+</body>
+</html>
