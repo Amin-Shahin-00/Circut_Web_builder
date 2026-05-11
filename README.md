@@ -3,7 +3,7 @@
 
 
 <div align="center">
-  <img src="https://upload.wikimedia.org/wikipedia/en/2/2b/Princess_Sumaya_University_for_Technology_logo.png" alt="PSUT Logo" width="200"/>
+  <img src="[https://upload.wikimedia.org/wikipedia/en/2/2b/Princess_Sumaya_University_for_Technology_logo.png](https://en.wikipedia.org/wiki/Princess_Sumaya_University_for_Technology)" alt="PSUT Logo" width="200"/>
 
   # Advanced Circuit Analyzer PRO
   **Developed by:** Amin Shahin  
